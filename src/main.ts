@@ -42,6 +42,12 @@ if (!root) {
 
 const app: HTMLDivElement = root;
 
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
 let state: AppState = {
   activeTab: "letters",
   soundMode: "piano",
@@ -55,33 +61,59 @@ let state: AppState = {
 
 let audioContext: AudioContext | null = null;
 
-function ensureAudioContext(): AudioContext {
-  audioContext ??= new AudioContext();
+async function ensureAudioContext(): Promise<AudioContext> {
+  const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
+
+  if (!AudioContextConstructor) {
+    throw new Error("This browser does not support Web Audio.");
+  }
+
+  audioContext ??= new AudioContextConstructor();
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
   return audioContext;
 }
 
-function playPianoTone(note: NoteInfo): void {
-  const context = ensureAudioContext();
+async function playPianoTone(note: NoteInfo): Promise<void> {
+  const context = await ensureAudioContext();
   const now = context.currentTime;
   const output = context.createGain();
   const filter = context.createBiquadFilter();
+  const body = context.createBiquadFilter();
+  const softClip = context.createDynamicsCompressor();
 
   output.gain.setValueAtTime(0.0001, now);
-  output.gain.exponentialRampToValueAtTime(0.7, now + 0.015);
-  output.gain.exponentialRampToValueAtTime(0.2, now + 0.32);
-  output.gain.exponentialRampToValueAtTime(0.0001, now + 1.18);
+  output.gain.exponentialRampToValueAtTime(0.82, now + 0.012);
+  output.gain.exponentialRampToValueAtTime(0.24, now + 0.32);
+  output.gain.exponentialRampToValueAtTime(0.0001, now + 1.26);
 
   filter.type = "lowpass";
-  filter.frequency.setValueAtTime(3200, now);
-  filter.frequency.exponentialRampToValueAtTime(900, now + 0.9);
+  filter.frequency.setValueAtTime(3800, now);
+  filter.frequency.exponentialRampToValueAtTime(980, now + 1.0);
   filter.Q.setValueAtTime(1.2, now);
-  filter.connect(output);
-  output.connect(context.destination);
+
+  body.type = "peaking";
+  body.frequency.setValueAtTime(240, now);
+  body.gain.setValueAtTime(3.5, now);
+  body.Q.setValueAtTime(0.8, now);
+
+  softClip.threshold.setValueAtTime(-11, now);
+  softClip.knee.setValueAtTime(18, now);
+  softClip.ratio.setValueAtTime(3, now);
+  softClip.attack.setValueAtTime(0.006, now);
+  softClip.release.setValueAtTime(0.15, now);
+
+  filter.connect(body);
+  body.connect(output);
+  output.connect(softClip);
+  softClip.connect(context.destination);
 
   const partials = [
-    { ratio: 1, gain: 0.68, type: "triangle" as OscillatorType, detune: 0 },
-    { ratio: 2, gain: 0.2, type: "sine" as OscillatorType, detune: -3 },
-    { ratio: 3, gain: 0.11, type: "sine" as OscillatorType, detune: 4 },
+    { ratio: 1, gain: 0.72, type: "triangle" as OscillatorType, detune: 0 },
+    { ratio: 2, gain: 0.26, type: "sine" as OscillatorType, detune: -3 },
+    { ratio: 3, gain: 0.13, type: "sine" as OscillatorType, detune: 4 },
+    { ratio: 4, gain: 0.06, type: "sine" as OscillatorType, detune: 6 },
   ];
 
   partials.forEach((partial) => {
@@ -94,120 +126,211 @@ function playPianoTone(note: NoteInfo): void {
     oscillator.connect(gain);
     gain.connect(filter);
     oscillator.start(now);
-    oscillator.stop(now + 1.2);
+    oscillator.stop(now + 1.3);
   });
 }
 
-function playSolfegeTone(note: NoteInfo): void {
-  const context = ensureAudioContext();
+async function playSolfegeTone(note: NoteInfo): Promise<void> {
+  const context = await ensureAudioContext();
   const now = context.currentTime;
   const output = context.createGain();
-  const oscillator = context.createOscillator();
   const vibrato = context.createOscillator();
   const vibratoDepth = context.createGain();
+  const sourceMix = context.createGain();
+  const singer = singerProfileFor(note.solfege);
 
   output.gain.setValueAtTime(0.0001, now);
-  output.gain.exponentialRampToValueAtTime(0.48, now + 0.08);
-  output.gain.setValueAtTime(0.42, now + 0.46);
-  output.gain.exponentialRampToValueAtTime(0.0001, now + 1.05);
+  output.gain.linearRampToValueAtTime(0.34, now + 0.08);
+  output.gain.setValueAtTime(0.34, now + 0.78);
+  output.gain.linearRampToValueAtTime(0.0001, now + 1.22);
   output.connect(context.destination);
 
-  oscillator.type = "sine";
-  oscillator.frequency.setValueAtTime(note.frequency, now);
-  vibrato.frequency.setValueAtTime(5.2, now);
-  vibratoDepth.gain.setValueAtTime(8, now);
-  vibrato.connect(vibratoDepth);
-  vibratoDepth.connect(oscillator.detune);
+  sourceMix.gain.setValueAtTime(0.22, now);
 
-  const vowelFormants = formantsFor(note.solfege);
-  vowelFormants.forEach((formant) => {
+  vibrato.frequency.setValueAtTime(5.8, now);
+  vibratoDepth.gain.setValueAtTime(0, now);
+  vibratoDepth.gain.linearRampToValueAtTime(6, now + 0.34);
+  vibrato.connect(vibratoDepth);
+
+  const harmonics = [
+    { ratio: 1, gain: 0.72, type: "sawtooth" as OscillatorType },
+    { ratio: 2, gain: 0.2, type: "triangle" as OscillatorType },
+    { ratio: 3, gain: 0.1, type: "sine" as OscillatorType },
+  ];
+
+  harmonics.forEach((harmonic) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = harmonic.type;
+    oscillator.frequency.setValueAtTime(note.frequency * harmonic.ratio, now);
+    oscillator.detune.setValueAtTime(singer.glideCents, now);
+    oscillator.detune.linearRampToValueAtTime(0, now + 0.16);
+    vibratoDepth.connect(oscillator.detune);
+    gain.gain.setValueAtTime(harmonic.gain, now);
+    oscillator.connect(gain);
+    gain.connect(sourceMix);
+    oscillator.start(now);
+    oscillator.stop(now + 1.24);
+  });
+
+  singer.formants.forEach((formant) => {
     const filter = context.createBiquadFilter();
     const gain = context.createGain();
     filter.type = "bandpass";
     filter.frequency.setValueAtTime(formant.frequency, now);
     filter.Q.setValueAtTime(formant.q, now);
     gain.gain.setValueAtTime(formant.gain, now);
-    oscillator.connect(filter);
+    sourceMix.connect(filter);
     filter.connect(gain);
     gain.connect(output);
   });
 
-  oscillator.start(now);
-  vibrato.start(now);
-  oscillator.stop(now + 1.08);
-  vibrato.stop(now + 1.08);
+  if (singer.noiseGain > 0) {
+    playConsonantNoise(context, output, now, singer.noiseGain, singer.noiseFrequency);
+  }
 
-  speakSolfege(note);
+  vibrato.start(now);
+  vibrato.stop(now + 1.24);
 }
 
-function formantsFor(solfege: NoteInfo["solfege"]): Array<{ frequency: number; q: number; gain: number }> {
-  const map: Record<NoteInfo["solfege"], Array<{ frequency: number; q: number; gain: number }>> = {
-    Do: [
-      { frequency: 520, q: 8, gain: 0.72 },
-      { frequency: 920, q: 10, gain: 0.38 },
-      { frequency: 2400, q: 12, gain: 0.16 },
-    ],
-    Re: [
-      { frequency: 470, q: 8, gain: 0.66 },
-      { frequency: 1650, q: 12, gain: 0.32 },
-      { frequency: 2600, q: 14, gain: 0.12 },
-    ],
-    Mi: [
-      { frequency: 310, q: 7, gain: 0.62 },
-      { frequency: 2200, q: 14, gain: 0.3 },
-      { frequency: 3000, q: 16, gain: 0.12 },
-    ],
-    Fa: [
-      { frequency: 610, q: 8, gain: 0.68 },
-      { frequency: 1180, q: 12, gain: 0.3 },
-      { frequency: 2600, q: 14, gain: 0.12 },
-    ],
-    Sol: [
-      { frequency: 570, q: 8, gain: 0.7 },
-      { frequency: 1050, q: 11, gain: 0.34 },
-      { frequency: 2350, q: 13, gain: 0.14 },
-    ],
-    La: [
-      { frequency: 730, q: 9, gain: 0.68 },
-      { frequency: 1250, q: 11, gain: 0.34 },
-      { frequency: 2550, q: 14, gain: 0.13 },
-    ],
-    Si: [
-      { frequency: 300, q: 7, gain: 0.64 },
-      { frequency: 2250, q: 14, gain: 0.32 },
-      { frequency: 3100, q: 16, gain: 0.12 },
-    ],
+function singerProfileFor(solfege: NoteInfo["solfege"]): {
+  formants: Array<{ frequency: number; q: number; gain: number }>;
+  glideCents: number;
+  noiseFrequency: number;
+  noiseGain: number;
+} {
+  const map: Record<NoteInfo["solfege"], {
+    formants: Array<{ frequency: number; q: number; gain: number }>;
+    glideCents: number;
+    noiseFrequency: number;
+    noiseGain: number;
+  }> = {
+    Do: {
+      formants: [
+        { frequency: 520, q: 7, gain: 0.72 },
+        { frequency: 900, q: 9, gain: 0.42 },
+        { frequency: 2380, q: 12, gain: 0.18 },
+      ],
+      glideCents: -18,
+      noiseFrequency: 1700,
+      noiseGain: 0.018,
+    },
+    Re: {
+      formants: [
+        { frequency: 470, q: 7, gain: 0.66 },
+        { frequency: 1600, q: 10, gain: 0.34 },
+        { frequency: 2550, q: 13, gain: 0.13 },
+      ],
+      glideCents: -15,
+      noiseFrequency: 2100,
+      noiseGain: 0.024,
+    },
+    Mi: {
+      formants: [
+        { frequency: 320, q: 7, gain: 0.62 },
+        { frequency: 2180, q: 12, gain: 0.32 },
+        { frequency: 3060, q: 15, gain: 0.14 },
+      ],
+      glideCents: -12,
+      noiseFrequency: 2600,
+      noiseGain: 0.012,
+    },
+    Fa: {
+      formants: [
+        { frequency: 610, q: 7, gain: 0.7 },
+        { frequency: 1200, q: 10, gain: 0.33 },
+        { frequency: 2580, q: 13, gain: 0.13 },
+      ],
+      glideCents: -20,
+      noiseFrequency: 3200,
+      noiseGain: 0.055,
+    },
+    Sol: {
+      formants: [
+        { frequency: 570, q: 7, gain: 0.7 },
+        { frequency: 1040, q: 10, gain: 0.36 },
+        { frequency: 2320, q: 12, gain: 0.15 },
+      ],
+      glideCents: -17,
+      noiseFrequency: 2400,
+      noiseGain: 0.038,
+    },
+    La: {
+      formants: [
+        { frequency: 730, q: 8, gain: 0.72 },
+        { frequency: 1240, q: 10, gain: 0.36 },
+        { frequency: 2540, q: 13, gain: 0.14 },
+      ],
+      glideCents: -14,
+      noiseFrequency: 1700,
+      noiseGain: 0.008,
+    },
+    Si: {
+      formants: [
+        { frequency: 310, q: 7, gain: 0.64 },
+        { frequency: 2240, q: 12, gain: 0.34 },
+        { frequency: 3080, q: 15, gain: 0.14 },
+      ],
+      glideCents: -10,
+      noiseFrequency: 3800,
+      noiseGain: 0.04,
+    },
   };
   return map[solfege];
 }
 
-function speakSolfege(note: NoteInfo): void {
-  if (!("speechSynthesis" in window)) {
-    return;
+function playConsonantNoise(
+  context: AudioContext,
+  output: AudioNode,
+  startTime: number,
+  amount: number,
+  frequency: number,
+): void {
+  const buffer = context.createBuffer(1, Math.floor(context.sampleRate * 0.09), context.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < data.length; index += 1) {
+    data[index] = (Math.random() * 2 - 1) * (1 - index / data.length);
   }
 
-  const utterance = new SpeechSynthesisUtterance(note.solfege);
-  utterance.lang = "en-US";
-  utterance.pitch = 1.55;
-  utterance.rate = 0.72;
-  utterance.volume = 0.28;
-  window.speechSynthesis.cancel();
-  window.setTimeout(() => window.speechSynthesis.speak(utterance), 35);
+  const source = context.createBufferSource();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+
+  source.buffer = buffer;
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(frequency, startTime);
+  filter.Q.setValueAtTime(0.85, startTime);
+  gain.gain.setValueAtTime(0.0001, startTime);
+  gain.gain.linearRampToValueAtTime(amount, startTime + 0.012);
+  gain.gain.linearRampToValueAtTime(0.0001, startTime + 0.09);
+
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(output);
+  source.start(startTime);
+  source.stop(startTime + 0.1);
 }
 
-function playNote(note: NoteInfo = state.currentNote): void {
+async function playNote(note: NoteInfo = state.currentNote): Promise<void> {
   if (state.soundMode === "piano") {
-    playPianoTone(note);
+    await playPianoTone(note);
   } else {
-    playSolfegeTone(note);
+    await playSolfegeTone(note);
   }
+}
+
+function requestNotePlayback(note: NoteInfo = state.currentNote): void {
+  void playNote(note).catch(() => {
+    state = { ...state, feedback: "请再点一次开启声音" };
+    render();
+  });
 }
 
 function selectNote(noteId: string, shouldPlay = true): void {
   state = { ...state, currentNote: findNote(noteId), feedback: `${noteId} / ${findNote(noteId).solfege} / 简谱 ${getJianpuWithOctave(findNote(noteId))}` };
   render();
   if (shouldPlay) {
-    playNote(state.currentNote);
+    requestNotePlayback(state.currentNote);
   }
 }
 
@@ -236,7 +359,7 @@ function answerQuiz(noteId: string): void {
   };
   localStorage.setItem("music-note-stars", String(stars));
   render();
-  playNote(state.quizNote);
+  requestNotePlayback(state.quizNote);
   if (correct) {
     window.setTimeout(nextQuiz, 680);
   }
@@ -562,7 +685,7 @@ function bindEvents(): void {
     button.addEventListener("click", () => {
       state = { ...state, soundMode: button.dataset.sound as SoundMode };
       render();
-      playNote();
+      requestNotePlayback();
     });
   });
 
@@ -602,10 +725,10 @@ function bindEvents(): void {
   app.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
     button.addEventListener("click", () => {
       if (button.dataset.action === "replay") {
-        playNote();
+        requestNotePlayback();
       }
       if (button.dataset.action === "quiz-tone") {
-        playNote(state.quizNote);
+        requestNotePlayback(state.quizNote);
       }
     });
   });
