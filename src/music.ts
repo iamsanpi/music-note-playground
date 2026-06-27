@@ -16,6 +16,17 @@ export interface NoteInfo {
   color: string;
 }
 
+export interface AccidentalNoteInfo {
+  id: string;
+  label: "C#" | "D#" | "F#" | "G#" | "A#";
+  octave: number;
+  midi: number;
+  frequency: number;
+  accidental: true;
+}
+
+export type PlayableNoteInfo = NoteInfo | AccidentalNoteInfo;
+
 const baseNotes: Array<Omit<NoteInfo, "id" | "octave" | "midi" | "frequency" | "staffIndex">> = [
   { letter: "C", solfege: "Do", jianpu: "1", color: "#ef5b5b" },
   { letter: "D", solfege: "Re", jianpu: "2", color: "#f28c28" },
@@ -67,6 +78,18 @@ function buildNote(letter: NoteLetter, octave: number): NoteInfo {
   };
 }
 
+function buildAccidental(label: AccidentalNoteInfo["label"], octave: number, semitone: number): AccidentalNoteInfo {
+  const midi = 12 * (octave + 1) + semitone;
+  return {
+    id: `${label}${octave}`,
+    label,
+    octave,
+    midi,
+    frequency: Number(frequencyFromMidi(midi).toFixed(3)),
+    accidental: true,
+  };
+}
+
 export const notes: NoteInfo[] = [
   buildNote("C", 4),
   buildNote("D", 4),
@@ -85,10 +108,46 @@ export const notes: NoteInfo[] = [
   buildNote("C", 6),
 ];
 
+export const accidentalNotes: AccidentalNoteInfo[] = [
+  buildAccidental("C#", 4, 1),
+  buildAccidental("D#", 4, 3),
+  buildAccidental("F#", 4, 6),
+  buildAccidental("G#", 4, 8),
+  buildAccidental("A#", 4, 10),
+  buildAccidental("C#", 5, 1),
+  buildAccidental("D#", 5, 3),
+  buildAccidental("F#", 5, 6),
+  buildAccidental("G#", 5, 8),
+  buildAccidental("A#", 5, 10),
+];
+
+export const playableNotes: PlayableNoteInfo[] = [...notes, ...accidentalNotes].sort((left, right) => left.midi - right.midi);
+
+export const cMajorScaleUpIds = ["C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"] as const;
+export const cMajorScaleDownIds = ["C5", "B4", "A4", "G4", "F4", "E4", "D4", "C4"] as const;
+
+export type ScaleDirection = "up" | "down";
+
+export function getScaleIds(direction: ScaleDirection): readonly string[] {
+  return direction === "up" ? cMajorScaleUpIds : cMajorScaleDownIds;
+}
+
+export function getScaleNotes(direction: ScaleDirection): NoteInfo[] {
+  return getScaleIds(direction).map((id) => findNote(id));
+}
+
 export function findNote(id: string): NoteInfo {
   const note = notes.find((candidate) => candidate.id === id);
   if (!note) {
     throw new Error(`Unknown note id: ${id}`);
+  }
+  return note;
+}
+
+export function findPlayableNote(id: string): PlayableNoteInfo {
+  const note = playableNotes.find((candidate) => candidate.id === id);
+  if (!note) {
+    throw new Error(`Unknown playable note id: ${id}`);
   }
   return note;
 }
